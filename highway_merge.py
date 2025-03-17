@@ -2,7 +2,7 @@
 # -*- coding: utf8
 
 # highway_merge.py
-# Replace OSM highways or tags with NVDB
+# Replace OSM highways with NVDB
 # Usage: python highway_merge.py [command] [input_osm.osm] [input_nvdb.osm]
 #    or: python highway_merge.py [command] [municipality name]
 # Commands: - replace: Merge all existing OSM highways with NVDB
@@ -18,12 +18,13 @@ import datetime
 import math
 import copy
 import json
-import os.path
+import os
+import socket
 import urllib.request, urllib.parse, urllib.error
 from xml.etree import ElementTree
 
 
-version = "3.1.0"
+version = "3.1.1"
 
 request_header = {"User-Agent": "osmno/highway_merge/" + version}
 
@@ -114,7 +115,7 @@ delete_negative_tags = ["sidewalk", "sidewalk:both", "sidewalk:left", "sidewalk:
 state_highway = ["motorway", "trunk", "primary", "secondary", "motorway_link", "trunk_link", "primary_link", "secondary_link"]  # + "tertiary" included for Sweden
 
 # Municipality highways in OSM to be matched with residential/pedestrian/tertiary/unclassified in NVDB
-municipality_highway = ["residential", "unclassified", "tertiary", "tertiary_link", "pedestrian", "busway"]
+municipality_highway = ["residential", "unclassified", "tertiary", "tertiary_link", "pedestrian", "busway", "living_street", "service"]
 
 force_ref = True  # True if ref in NVDB and OSM must match, for "-tagref" function
 
@@ -129,34 +130,46 @@ def message (line):
 
 
 
-# Open file/api, try up to 6 times, each time with double sleep time
+# Open URL request. Retry if needed.
 
 def open_url (url):
 
 	tries = 0
-	while tries < 6:
+	while tries <= 5:
 		try:
 			return urllib.request.urlopen(url)
-		except urllib.error.HTTPError as e:
-			if e.code in [429, 503, 504]:  # Too many requests, Service unavailable or Gateway timed out
-				if tries  == 0:
-					message ("\n") 
-				message ("\rRetry %i... " % (tries + 1))
-				time.sleep(5 * (2**tries))
-				tries += 1
-				error = e
-			elif e.code in [401, 403]:
-				message ("\nHTTP error %i: %s\n" % (e.code, e.reason))  # Unauthorized or Blocked
-				sys.exit()
-			elif e.code in [400, 409, 412]:
-				message ("\nHTTP error %i: %s\n" % (e.code, e.reason))  # Bad request, Conflict or Failed precondition
-				message ("%s\n" % str(e.read()))
-				sys.exit()
-			else:
+		except Exception as err:
+			if tries == 5:
 				raise
-	
-	message ("\nHTTP error %i: %s\n" % (error.code, error.reason))
-	sys.exit()
+			elif tries == 0:
+				message ("\n") 
+			message ("Retry %i: %s\n" % (tries + 1, err))
+			time.sleep(5 * (2**tries))
+			tries += 1
+
+
+
+# Load data from api. Retry if needed.
+
+def load_data (url):
+
+	tries = 0
+	while tries <= 5:
+		try:
+			request = urllib.request.Request(url, headers=request_header)
+			file = urllib.request.urlopen(request)
+			data = file.read()
+			file.close()
+			return data
+
+		except Exception as err:
+			if tries == 5:
+				raise
+			elif tries == 0:
+				message ("\n") 
+			message ("Retry %i: %s\n" % (tries + 1, err))
+			time.sleep(5 * (2**tries))
+			tries += 1
 
 
 
@@ -473,10 +486,8 @@ def load_files (name_osm):
 				query = query.replace('nwr["highway"](area.a);', 'nwr["highway"](area.a);nwr["railway"](area.a);nwr["man_made"="bridge"](area.a);')	
 
 			filename_osm += ".osm"
-			request = urllib.request.Request(overpass_api + "?data=" + urllib.parse.quote(query), headers=request_header)
-			file = open_url(request)
-			data = file.read()
-			file.close()
+
+			data = load_data(overpass_api + "?data=" + urllib.parse.quote(query))
 
 			root_osm = ElementTree.fromstring(data)
 			tree_osm = ElementTree.ElementTree(root_osm)
@@ -795,7 +806,8 @@ def add_new_highways():
 	# Does not identify the best match, but checks how many nodes have a match with any highway.
 
 	for nvdb_id, nvdb_way in iter(nvdb_ways.items()):
-		message ("\r%i " % count)
+		if count % 100 == 0:
+			message ("\r%i " % count)
 		count -= 1
 
 		if not nvdb_way['highway']:  # Skip ferries etc
@@ -822,7 +834,7 @@ def add_new_highways():
 			nvdb_ways[ nvdb_id ]['missing'] = "%i" % match_length
 			count_missing += 1
 
-	message ("\r  \t%i missing highways\n" % count_missing)
+	message ("\r   \t%i missing highways\n" % count_missing)
 
 
 
@@ -1202,7 +1214,7 @@ def tag_highways():
 		if "nvdb_id" in segment:
 			count_match += 1			
 
-	message ("\r  \tMatched %i highway segments, %i not matched\n" % (count_match, len(segments) - count_match))
+	message ("\r   \tMatched %i highway segments, %i not matched\n" % (count_match, len(segments) - count_match))
 	message ("\tAdded %i new highway segments\n" % count_new_segments)
 	message ("\tInserted %i new intersection nodes from NVDB\n" % count_new_nodes)
 
